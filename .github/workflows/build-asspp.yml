@@ -1,0 +1,360 @@
+name: Asspp Auto Build
+
+on:
+  schedule:
+    - cron: '57 19 * * *' # 每天北京时间 03:57，避开整点高峰
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: '强制编译指定的 Tag 版本 (例如: 4.2.1)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-build-asspp
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    name: Check Version
+    runs-on: ubuntu-22.04
+    outputs:
+      has_new_version: ${{ steps.compare.outputs.has_new_version }}
+      app_id: ${{ steps.compare.outputs.app_id }}
+      upstream_tag: ${{ steps.compare.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.compare.outputs.upstream_sha }}
+      release_tag: ${{ steps.compare.outputs.release_tag }}
+    steps:
+      - name: 获取上游最新 Tag 并检查本地 Release
+        id: compare
+        shell: bash
+        env:
+          APP_ID: asspp
+          FORCE_TAG: ${{ inputs.force_tag }}
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: Lakr233/Asspp
+        run: |
+          set -euo pipefail
+          if [ -n "$FORCE_TAG" ]; then
+            UPSTREAM_TAG="$FORCE_TAG"
+          else
+            UPSTREAM_TAG=$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name // empty' 2>/dev/null || true)
+            if [ -z "$UPSTREAM_TAG" ]; then
+              UPSTREAM_TAG=$(gh api --paginate "repos/${UPSTREAM_REPO}/tags?per_page=100" --jq '.[].name' \
+                | grep -E '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+                | sort -V \
+                | tail -n 1)
+            fi
+          fi
+
+          UPSTREAM_TAG="${UPSTREAM_TAG#refs/tags/}"
+          if [ -z "$UPSTREAM_TAG" ] || ! git check-ref-format "refs/tags/${UPSTREAM_TAG}"; then
+            echo "::error::无法获取有效的上游标签: ${UPSTREAM_TAG:-<empty>}"
+            exit 1
+          fi
+
+          ENCODED_UPSTREAM_TAG=$(jq -rn --arg value "$UPSTREAM_TAG" '$value | @uri')
+          UPSTREAM_SHA=$(gh api "repos/${UPSTREAM_REPO}/commits/${ENCODED_UPSTREAM_TAG}" --jq '.sha')
+          if ! [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::无法把 ${UPSTREAM_TAG} 解析为固定提交 SHA"
+            exit 1
+          fi
+
+          RELEASE_TAG="${APP_ID}-${UPSTREAM_TAG}"
+          {
+            echo "app_id=$APP_ID"
+            echo "upstream_tag=$UPSTREAM_TAG"
+            echo "upstream_sha=$UPSTREAM_SHA"
+            echo "release_tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -n "$FORCE_TAG" ]; then
+            echo "has_new_version=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ENCODED_RELEASE_TAG=$(jq -rn --arg value "$RELEASE_TAG" '$value | @uri')
+          STATUS=$(curl -sS --retry 2 --retry-delay 5 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${ENCODED_RELEASE_TAG}")
+          case "$STATUS" in
+            200) echo "has_new_version=false" >> "$GITHUB_OUTPUT" ;;
+            404) echo "has_new_version=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::检查 ${RELEASE_TAG} 时 GitHub API 返回 HTTP ${STATUS}"
+              exit 1
+              ;;
+          esac
+
+  archive-source:
+    name: Archive clean upstream source
+    needs: check-version
+    if: needs.check-version.outputs.has_new_version == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout immutable upstream commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Lakr233/Asspp
+          ref: ${{ needs.check-version.outputs.upstream_sha }}
+          path: app-src
+          persist-credentials: false
+
+      - name: Create source archive from tracked files
+        shell: bash
+        env:
+          APP_ID: ${{ needs.check-version.outputs.app_id }}
+          UPSTREAM_TAG: ${{ needs.check-version.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${UPSTREAM_TAG#v}"
+          SRC_NAME="${APP_ID}-${VERSION}-source"
+          mkdir -p source-assets
+          git -C app-src archive --format=tar --prefix="${SRC_NAME}/" HEAD \
+            | gzip -n -9 > "source-assets/${SRC_NAME}.tar.gz"
+          test -s "source-assets/${SRC_NAME}.tar.gz"
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-${{ needs.check-version.outputs.app_id }}
+          path: source-assets/*.tar.gz
+          if-no-files-found: error
+          retention-days: 5
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: check-version
+    if: needs.check-version.outputs.has_new_version == 'true'
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ios
+            script: compile.release.mobile.ci.sh
+            output_ext: ipa
+            release_arch: arm64
+            expected_archs: arm64
+          - platform: macos
+            script: compile.release.osx.sh
+            output_ext: zip
+            release_arch: universal
+            expected_archs: arm64 x86_64
+    steps:
+      - name: Checkout immutable upstream commit (with submodules)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Lakr233/Asspp
+          ref: ${{ needs.check-version.outputs.upstream_sha }}
+          path: app-src
+          persist-credentials: false
+          submodules: true
+
+      - name: Select newest non-beta Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          best_path=""
+          best_ver=""
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            info="$app/Contents/Info.plist"
+            [ -f "$info" ] || continue
+            case "$(printf '%s' "$app" | tr '[:upper:]' '[:lower:]')" in
+              *beta*|*_rc*) continue ;;
+            esac
+            ver="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info" 2>/dev/null || true)"
+            [ -n "$ver" ] || continue
+            if [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ver" | sort -V | tail -1)" = "$ver" ]; then
+              best_ver="$ver"
+              best_path="$app"
+            fi
+          done
+          if [ -z "$best_path" ]; then
+            echo "::error::未找到非 beta 版 Xcode"
+            exit 1
+          fi
+          echo "Selected Xcode $best_ver at $best_path"
+          sudo xcode-select -s "$best_path"
+          xcodebuild -version
+
+      - name: Ensure iOS platform is installed
+        if: ${{ matrix.platform == 'ios' }}
+        shell: bash
+        run: xcodebuild -downloadPlatform iOS || true
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ldid
+          command -v ldid
+          command -v xcbeautify
+
+      - name: Build and package ${{ matrix.platform }}
+        working-directory: ./app-src
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ needs.check-version.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${UPSTREAM_TAG#v}"
+          SCRIPT="Resources/Scripts/${{ matrix.script }}"
+          OUTPUT="$RUNNER_TEMP/Asspp.${{ matrix.output_ext }}"
+
+          chmod +x "$SCRIPT"
+          zsh "$SCRIPT" "$(pwd)" "$OUTPUT"
+
+          if [ ! -s "$OUTPUT" ]; then
+            echo "::error::构建未产出 ${{ matrix.output_ext }} 文件"
+            exit 1
+          fi
+
+          VERIFY_DIR=$(mktemp -d)
+          trap 'rm -rf "$VERIFY_DIR"' EXIT
+          unzip -q "$OUTPUT" -d "$VERIFY_DIR"
+
+          case "${{ matrix.platform }}" in
+            ios)
+              APP_ROOT="$VERIFY_DIR/Payload"
+              PLIST_RELATIVE_PATH="Info.plist"
+              EXECUTABLE_PREFIX=""
+              ;;
+            macos)
+              APP_ROOT="$VERIFY_DIR"
+              PLIST_RELATIVE_PATH="Contents/Info.plist"
+              EXECUTABLE_PREFIX="Contents/MacOS/"
+              ;;
+            *)
+              echo "::error::未知构建平台: ${{ matrix.platform }}"
+              exit 1
+              ;;
+          esac
+
+          APPS=()
+          while IFS= read -r app; do
+            APPS+=("$app")
+          done < <(find "$APP_ROOT" -maxdepth 1 -type d -name '*.app' -print)
+          if [ "${#APPS[@]}" -ne 1 ]; then
+            echo "::error::归档中应有 1 个顶层 .app，实际 ${#APPS[@]} 个"
+            find "$VERIFY_DIR" -maxdepth 3 -type d -name '*.app' -print
+            exit 1
+          fi
+
+          APP_PATH="${APPS[0]}"
+          INFO_PLIST="$APP_PATH/$PLIST_RELATIVE_PATH"
+          test -f "$INFO_PLIST"
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")
+          BINARY="$APP_PATH/$EXECUTABLE_PREFIX$EXECUTABLE"
+          test -f "$BINARY"
+
+          ARCHS=$(lipo -archs "$BINARY")
+          NORMALIZED_ARCHS=$(printf '%s\n' "$ARCHS" | tr ' ' '\n' | LC_ALL=C sort | xargs)
+          if [ "$NORMALIZED_ARCHS" != "${{ matrix.expected_archs }}" ]; then
+            echo "::error::可执行文件架构应为 ${{ matrix.expected_archs }}，实际为 $NORMALIZED_ARCHS"
+            exit 1
+          fi
+          if find "$APP_PATH" -type d -name _CodeSignature -print -quit | grep -q .; then
+            echo "::error::预期未签名应用，但检测到了 _CodeSignature"
+            exit 1
+          fi
+
+          mkdir -p release-assets
+          RELEASE_ASSET="release-assets/Asspp-${VERSION}-${{ matrix.platform }}-${{ matrix.release_arch }}.${{ matrix.output_ext }}"
+          cp "$OUTPUT" "$RELEASE_ASSET"
+          test -s "$RELEASE_ASSET"
+
+      - name: Upload verified build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-${{ needs.check-version.outputs.app_id }}-${{ matrix.platform }}
+          path: app-src/release-assets/*
+          if-no-files-found: error
+          retention-days: 5
+
+  create-release:
+    name: Create GitHub Release
+    needs: [check-version, archive-source, build]
+    if: needs.check-version.outputs.has_new_version == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Verify complete artifact manifest
+        shell: bash
+        env:
+          APP_ID: ${{ needs.check-version.outputs.app_id }}
+          UPSTREAM_TAG: ${{ needs.check-version.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${UPSTREAM_TAG#v}"
+          EXPECTED=(
+            "Asspp-${VERSION}-ios-arm64.ipa"
+            "Asspp-${VERSION}-macos-universal.zip"
+            "${APP_ID}-${VERSION}-source.tar.gz"
+          )
+          for name in "${EXPECTED[@]}"; do
+            COUNT=$(find artifacts -type f -name "$name" | wc -l)
+            if [ "$COUNT" -ne 1 ]; then
+              echo "::error::产物 $name 的数量应为 1，实际为 $COUNT"
+              exit 1
+            fi
+          done
+          ACTUAL_COUNT=$(find artifacts -type f | wc -l)
+          if [ "$ACTUAL_COUNT" -ne "${#EXPECTED[@]}" ]; then
+            echo "::error::发现未列入清单的产物；预期 ${#EXPECTED[@]} 个，实际 $ACTUAL_COUNT 个"
+            find artifacts -type f -print
+            exit 1
+          fi
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHECKSUM_FILE=$(mktemp)
+          cd artifacts
+          find . -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  \./#  #' > "$CHECKSUM_FILE"
+          mv "$CHECKSUM_FILE" SHA256SUMS
+          test -s SHA256SUMS
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: artifacts/**/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.check-version.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: Asspp ${{ needs.check-version.outputs.upstream_tag }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          body: |
+            Automated build of [Lakr233/Asspp ${{ needs.check-version.outputs.upstream_tag }}](https://github.com/Lakr233/Asspp/releases/tag/${{ needs.check-version.outputs.upstream_tag }}).
+
+            Upstream commit: `${{ needs.check-version.outputs.upstream_sha }}`
+            SHA-256 checksums are included in `SHA256SUMS`; GitHub build provenance is attached to the artifacts.
+
+            - `Asspp-${{ needs.check-version.outputs.upstream_tag }}-ios-arm64.ipa` — unsigned iOS app (iOS 17+), install via SideStore/AltStore/TrollStore
+            - `Asspp-${{ needs.check-version.outputs.upstream_tag }}-macos-universal.zip` — unsigned universal macOS app (macOS 15+), contains `Asspp.app`
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
