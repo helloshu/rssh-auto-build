@@ -14,6 +14,7 @@ An automated workflow hub designed to track upstream open-source releases, trigg
 | **Geranium** | iOS LocSim, Daemon Manager, Cleaner & Superviser (TrollStore) | [c22dev/Geranium](https://github.com/c22dev/Geranium) | [`build-geranium.yml`](.github/workflows/build-geranium.yml) | ![Geranium Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-geranium.yml/badge.svg) |
 | **ChatGBeFree** | iOS jailbreak tweak — bypass ChatGPT forced sunset upgrade | [liamschwie/ChatGBeFree](https://github.com/liamschwie/ChatGBeFree) | [`build-chatgbefree.yml`](.github/workflows/build-chatgbefree.yml) | ![ChatGBeFree Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-chatgbefree.yml/badge.svg) |
 | **Asspp** | Swift multi-region App Store manager (iOS + macOS) | [Lakr233/Asspp](https://github.com/Lakr233/Asspp) | [`build-asspp.yml`](.github/workflows/build-asspp.yml) | ![Asspp Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-asspp.yml/badge.svg) |
+| **OPPO Health Export** | Android LSPosed module — export encrypted health data to AI agents | [foxlesbiao/oppo-health-export](https://github.com/foxlesbiao/oppo-health-export) | [`build-oppo-health-export.yml`](.github/workflows/build-oppo-health-export.yml) | ![OPPO Health Export Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-oppo-health-export.yml/badge.svg) |
 
 ---
 

@@ -14,6 +14,7 @@
 | **Geranium** | iOS 定位模拟、守护进程管理、清理与监管工具 (TrollStore) | [c22dev/Geranium](https://github.com/c22dev/Geranium) | [`build-geranium.yml`](.github/workflows/build-geranium.yml) | ![Geranium Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-geranium.yml/badge.svg) |
 | **ChatGBeFree** | iOS 越狱插件 — 绕过 ChatGPT 强制升级限制 | [liamschwie/ChatGBeFree](https://github.com/liamschwie/ChatGBeFree) | [`build-chatgbefree.yml`](.github/workflows/build-chatgbefree.yml) | ![ChatGBeFree Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-chatgbefree.yml/badge.svg) |
 | **Asspp** | Swift 多区域 App Store 管理工具 (iOS + macOS) | [Lakr233/Asspp](https://github.com/Lakr233/Asspp) | [`build-asspp.yml`](.github/workflows/build-asspp.yml) | ![Asspp Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-asspp.yml/badge.svg) |
+| **OPPO Health Export** | Android LSPosed 模块 — 导出加密健康数据对接 AI Agent | [foxlesbiao/oppo-health-export](https://github.com/foxlesbiao/oppo-health-export) | [`build-oppo-health-export.yml`](.github/workflows/build-oppo-health-export.yml) | ![OPPO Health Export Build Status](https://github.com/helloshu/auto-builds/actions/workflows/build-oppo-health-export.yml/badge.svg) |
 
 ---
 
